@@ -168,6 +168,7 @@ if (BUILD_SUPPORTED)
     DFHACK_PLUGIN(building-hacks building-hacks.cpp LINK_LIBRARIES lua)
     DFHACK_PLUGIN(embark-tools embark-tools.cpp)
     DFHACK_PLUGIN(petcapRemover petcapRemover.cpp)
+	DFHACK_PLUGIN(remotefortressreader remotefortressreader.cpp PROTOBUFS RemoteFortressReader)
 endif()
 
 # this is the skeleton plugin. If you want to make your own, make a copy and then change it
