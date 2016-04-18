@@ -61,6 +61,7 @@
 #include "df/caste_raw.h"
 
 #include "df/enabler.h"
+#include "df/graphic.h"
 
 //DFhack specific headers
 #include "modules/Maps.h"
@@ -74,6 +75,9 @@
 #include "modules/World.h"
 #include "TileTypes.h"
 #include "MiscUtils.h"
+#include "Hooks.h"
+#include "SDL_events.h"
+#include "SDL_keyboard.h"
 
 #include <vector>
 #include <time.h>
@@ -92,6 +96,8 @@ DFHACK_PLUGIN("RemoteFortressReader");
 using namespace df::global;
 #else
 REQUIRE_GLOBAL(world);
+REQUIRE_GLOBAL(gps);
+REQUIRE_GLOBAL(ui);
 #endif
 
 // Here go all the command declarations...
@@ -114,6 +120,8 @@ static command_result GetWorldMapCenter(color_ostream &stream, const EmptyMessag
 static command_result GetRegionMaps(color_ostream &stream, const EmptyMessage *in, RegionMaps *out);
 static command_result GetCreatureRaws(color_ostream &stream, const EmptyMessage *in, CreatureRawList *out);
 static command_result GetPlantRaws(color_ostream &stream, const EmptyMessage *in, PlantRawList *out);
+static command_result CopyScreen(color_ostream &stream, const EmptyMessage *in, ScreenCapture *out);
+static command_result PassKeyboardEvent(color_ostream &stream, const KeyboardEvent *in);
 
 
 void CopyBlock(df::map_block * DfBlock, RemoteFortressReader::MapBlock * NetBlock, MapExtras::MapCache * MC, DFCoord pos);
@@ -167,6 +175,8 @@ DFhackCExport RPCService *plugin_rpcconnect(color_ostream &)
     svc->addFunction("GetCreatureRaws", GetCreatureRaws);
     svc->addFunction("GetWorldMapCenter", GetWorldMapCenter);
     svc->addFunction("GetPlantRaws", GetPlantRaws);
+    svc->addFunction("CopyScreen", CopyScreen);
+    svc->addFunction("PassKeyboardEvent", PassKeyboardEvent);
     return svc;
 }
 
@@ -212,7 +222,7 @@ void ConvertDfColor(int16_t index, RemoteFortressReader::ColorDefinition * out)
 
 void ConvertDfColor(int16_t in[3], RemoteFortressReader::ColorDefinition * out)
 {
-    int index = in[0] + 8 * in[1];
+    int index = in[0] | (8 * in[2]);
     ConvertDfColor(index, out);
 }
 
@@ -1436,6 +1446,8 @@ static command_result GetViewInfo(color_ostream &stream, const EmptyMessage *in,
     out->set_cursor_pos_x(cx);
     out->set_cursor_pos_y(cy);
     out->set_cursor_pos_z(cz);
+    out->set_follow_unit_id(ui->follow_unit);
+    out->set_follow_item_id(ui->follow_item);
     return CR_OK;
 }
 
@@ -1715,12 +1727,36 @@ static command_result GetWorldMap(color_ostream &stream, const EmptyMessage *in,
         return CR_FAILURE;
     }
     df::world_data * data = df::global::world->world_data;
+    if (!data->region_map)
+    {
+        out->set_world_width(0);
+        out->set_world_height(0);
+        return CR_FAILURE;
+    }
     int width = data->world_width;
     int height = data->world_height;
     out->set_world_width(width);
     out->set_world_height(height);
     out->set_name(Translation::TranslateName(&(data->name), false));
     out->set_name_english(Translation::TranslateName(&(data->name), true));
+    auto poles = data->flip_latitude;
+    switch (poles)
+    {
+    case df::world_data::None:
+        out->set_world_poles(WorldPoles::NO_POLES);
+        break;
+    case df::world_data::North:
+        out->set_world_poles(WorldPoles::NORTH_POLE);
+        break;
+    case df::world_data::South:
+        out->set_world_poles(WorldPoles::SOUTH_POLE);
+        break;
+    case df::world_data::Both:
+        out->set_world_poles(WorldPoles::BOTH_POLES);
+        break;
+    default:
+        break;
+    }
     for (int yy = 0; yy < height; yy++)
         for (int xx = 0; xx < width; xx++)
         {
@@ -1820,6 +1856,24 @@ static void CopyLocalMap(df::world_data * worldData, df::world_region_details* w
     sprintf(name, "Region %d, %d", pos_x, pos_y);
     out->set_name_english(name);
     out->set_name(name);
+    auto poles = worldData->flip_latitude;
+    switch (poles)
+    {
+    case df::world_data::None:
+        out->set_world_poles(WorldPoles::NO_POLES);
+        break;
+    case df::world_data::North:
+        out->set_world_poles(WorldPoles::NORTH_POLE);
+        break;
+    case df::world_data::South:
+        out->set_world_poles(WorldPoles::SOUTH_POLE);
+        break;
+    case df::world_data::Both:
+        out->set_world_poles(WorldPoles::BOTH_POLES);
+        break;
+    default:
+        break;
+    }
 
     df::world_region_details * south = NULL;
     df::world_region_details * east = NULL;
@@ -1972,7 +2026,7 @@ static command_result GetPlantRaws(color_ostream &stream, const EmptyMessage *in
                 df::plant_growth_print* print_local = growth_local->prints[k];
                 GrowthPrint* print_remote = growth_remote->add_prints();
                 print_remote->set_priority(print_local->priority);
-                print_remote->set_color(print_local->color[0] + (print_local->color[1] * 8));
+                print_remote->set_color(print_local->color[0] | (print_local->color[2] * 8));
                 print_remote->set_timing_start(print_local->timing_start);
                 print_remote->set_timing_end(print_local->timing_end);
                 print_remote->set_tile(print_local->tile_growth);
@@ -1995,5 +2049,35 @@ static command_result GetPlantRaws(color_ostream &stream, const EmptyMessage *in
             growthMat->set_mat_type(growth_local->mat_type);
         }
     }
+    return CR_OK;
+}
+
+static command_result CopyScreen(color_ostream &stream, const EmptyMessage *in, ScreenCapture *out)
+{
+    df::graphic * gps = df::global::gps;
+    out->set_width(gps->dimx);
+    out->set_height(gps->dimy);
+    for (int i = 0; i < (gps->dimx * gps->dimy); i++)
+    {
+        int index = i * 4;
+        auto tile = out->add_tiles();
+        tile->set_character(gps->screen[index]);
+        tile->set_foreground(gps->screen[index + 1] | (gps->screen[index + 3] * 8));
+        tile->set_background(gps->screen[index + 2]);
+    }
+
+    return CR_OK;
+}
+
+static command_result PassKeyboardEvent(color_ostream &stream, const KeyboardEvent *in)
+{
+    SDL::Event e;
+    e.key.type = in->type();
+    e.key.state = in->state();
+    e.key.ksym.mod = (SDL::Mod)in->mod();
+    e.key.ksym.scancode = in->scancode();
+    e.key.ksym.sym = (SDL::Key)in->sym();
+    e.key.ksym.unicode = in->unicode();
+    SDL_PushEvent(&e);
     return CR_OK;
 }
